@@ -1,0 +1,165 @@
+import { io } from "socket.io-client";
+import { TextStreamer, full, env, } from '@xenova/transformers';
+import AutomaticSpeechRecognitionPipeline from './AutomaticSpeechRecognitionPipeline';
+
+// Configure ONNX runtime
+env.backends.onnx.wasm = { numThreads: 4, wasmPaths: 'https://202.45.47.52:3002/ort-wasm/' };
+
+const MAX_NEW_TOKENS = 64;
+
+var socket = null;
+var processing = false;
+
+async function generate({ audio, language }, onLocal) {
+    if (processing) return;
+    processing = true;
+
+    // Tell the main thread we are starting
+    self.postMessage({ status: 'whisper_start' });
+	
+	let outputText = '';
+	
+	if (onLocal) {
+		// Retrieve the text-generation pipeline.
+		const [tokenizer, processor, model] = await AutomaticSpeechRecognitionPipeline.getInstance();
+
+		let startTime;
+		let numTokens = 0;
+		const callback_function = (output) => {
+			startTime ??= performance.now();
+
+			let tps;
+			if (numTokens++ > 0) {
+				tps = numTokens / (performance.now() - startTime) * 1000;
+			}
+			self.postMessage({
+				status: 'update',
+				output, tps, numTokens,
+			});
+		}
+
+		const streamer = new TextStreamer(tokenizer, {
+			skip_prompt: true,
+			skip_special_tokens: true,
+			callback_function,
+		});
+
+		const inputs = await processor(audio);
+		
+		const outputs = await model.generate({
+			...inputs,
+			max_new_tokens: MAX_NEW_TOKENS,
+			chunk_length_s: 30,
+			stride_length_s: 10,
+			language,
+			streamer,
+		});
+
+		outputText = tokenizer.batch_decode(outputs, { skip_special_tokens: true });
+		
+		// Send the output back to the main thread
+		self.postMessage({
+			status: 'whisper_complete',
+			output: outputText,
+		});
+		processing = false;
+		
+	} else {
+		if (!socket.connected) {
+			try {
+				socket.connect();
+			} catch (Error) {
+				
+			}
+		}
+		socket.emit('audio_chunk', { audio, language });
+			
+		await new Promise((resolve) => {
+			let lock = false;
+			socket.on("transcription", (data) => {
+				if (lock) return;
+				lock = true;
+				
+				outputText = data.transcription;
+				
+				// Send the output back to the main thread
+				self.postMessage({
+					status: 'update',
+					output: outputText,
+					tps: 5,
+					numTokens: 5,
+				});
+				self.postMessage({
+					status: 'whisper_complete',
+					output: outputText,
+				});
+				console.log("[App] Received transcription from Whisper server.", outputText);
+				socket.disconnect();
+				lock = false;
+				processing = false;
+				resolve();
+			});
+		});
+	}
+}
+
+async function load(data) {
+	const { device, modelIndex } = data;
+	
+    self.postMessage({
+        status: 'loading',
+        data: 'Loading model...',
+    });
+
+    // Load the pipeline and save it for future use.
+    const [tokenizer, processor, model] = await AutomaticSpeechRecognitionPipeline.getInstance(x => {
+        // Add workerType to the progress message
+        self.postMessage(x);
+    }, device, modelIndex);
+
+    self.postMessage({
+        status: 'loading',
+        data: 'Compiling shaders and warming up model...'
+    });
+	
+	var melBins = 80;
+	if (modelIndex == 3) {
+		melBins = 128;
+	}
+
+    // Run model with dummy input to compile shaders
+    await model.generate({
+        input_features: full([1, melBins, 3000], 0.0), // 80 bins, 128 bins for large/turbo
+        max_new_tokens: 1,
+		language: "en",
+    });
+    self.postMessage({ status: 'ready'});
+}
+// Listen for messages from the main thread
+self.addEventListener('message', async (e) => {
+    const { type, data, onLocal } = e.data;
+
+    switch (type) {
+        case 'load':
+			if (onLocal) {
+				load(data);
+			} else {
+				socket = io("wss://202.45.47.52:3004", {
+					transports: ["websocket"],
+					secure: true,
+				});
+				socket.on("connect", () => {
+					console.log("[App] Whisper WebSocket set up.");
+				});
+				socket.on("disconnect", () => {
+					console.log("[App] Whisper WebSocket disconnected.");
+				});
+				self.postMessage({ status: 'ready'});
+			}
+            break;
+
+        case 'generate':
+            generate(data, onLocal);
+            break;
+    }
+});

@@ -1,0 +1,28 @@
+<script>
+let pages = 100;
+try {
+    while (true) {
+        const memory = new WebAssembly.Memory({
+            initial: pages,
+            maximum: pages
+        });
+        pages += 100
+		
+		allocatedMemory = `${(pages-100) * 65536 / (1024*1024)} MB`;
+		wasmMemoryLimit = '4096 MB';
+		usedHeapSize = `${Math.floor(performance.memory.usedJSHeapSize / 1024 / 1024)} MB`;
+		browserHeapSizeLimit = `${Math.floor(performance.memory.jsHeapSizeLimit / 1024 / 1024)} MB RAM`;
+		
+		console.log(`Allocated: ${allocatedMemory}/${wasmMemoryLimit}\nHeap: ${usedHeapSize}/${browserHeapSizeLimit}`);
+    }
+} catch (e) {
+    console.error(`${e.message}`);
+	
+	allocatedMemory = `${(pages-100) * 65536 / (1024*1024)} MB`;
+	wasmMemoryLimit = '4096 MB';
+	usedHeapSize = `${Math.floor(performance.memory.usedJSHeapSize / 1024 / 1024)} MB`;
+	browserHeapSizeLimit = `${Math.floor(performance.memory.jsHeapSizeLimit / 1024 / 1024)} MB RAM`;
+    
+	window.prompt(`Allocated: ${allocatedMemory}/${wasmMemoryLimit}\nHeap: ${usedHeapSize}/${browserHeapSizeLimit}`);
+}
+</script>

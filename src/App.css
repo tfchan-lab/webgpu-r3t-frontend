@@ -1,0 +1,106 @@
+.md\:scalable-content {
+  transform: scale(calc(min(100vw, 100vh) / 100));
+  transform-origin: center;
+}
+
+@keyframes slideDown {
+    from {
+        transform: translateY(0);
+    }
+    to {
+        transform: translateY(100%);
+    }
+}
+
+@keyframes slideUp {
+    from {
+        transform: translateY(100%);
+    }
+    to {
+        transform: translateY(0);
+    }
+}
+
+.slide-down {
+    animation: slideDown 0.25s forwards;
+}
+
+.slide-up {
+    animation: slideUp 0.25s forwards;
+}
+
+.config-pagination > .swiper-pagination-bullet {
+  width: 20px;
+  height: 20px;
+  text-align: center;
+  line-height: 20px;
+  font-size: 12px;
+  color: #000;
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.config-pagination > .swiper-pagination-bullet-active {
+  color: #fff;
+  background: #007aff;
+}
+
+/* IBM Plex Sans - Variable Font (Normal and Width Variants) */
+@font-face {
+  font-family: 'IBM Plex Sans';
+  src: url('./fonts/IBMPlexSans-VariableFont_wdth,wght.ttf') format('truetype');
+  font-weight: 100 700; /* Thin to Bold */
+  font-style: normal;
+  font-display: swap;
+}
+
+/* IBM Plex Sans - Variable Font (Italic and Width Variants) */
+@font-face {
+  font-family: 'IBM Plex Sans';
+  src: url('./fonts/IBMPlexSans-Italic-VariableFont_wdth,wght.ttf') format('truetype');
+  font-weight: 100 700; /* Thin to Bold */
+  font-style: italic;
+  font-display: swap;
+}
+
+/* Noto Sans Traditional Chinese - Variable Font */
+@font-face {
+  font-family: 'Noto Sans';
+  src: url('./fonts/NotoSansTC-VariableFont_wght.ttf') format('truetype');
+  font-weight: 100 900; /* Thin to Bold */
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Noto Sans Simplified Chinese - Variable Font */
+@font-face {
+  font-family: 'Noto Sans';
+  src: url('./fonts/NotoSansSC-VariableFont_wght.ttf') format('truetype');
+  font-weight: 100 900; /* Thin to Bold */
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Noto Sans Japanese - Variable Font */
+@font-face {
+  font-family: 'Noto Sans';
+  src: url('./fonts/NotoSansJP-VariableFont_wght.ttf') format('truetype');
+  font-weight: 100 900; /* Thin to Bold */
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Noto Sans Japanese - Variable Font */
+@font-face {
+  font-family: 'Noto Sans';
+  src: url('./fonts/NotoSansKR-VariableFont_wght.ttf') format('truetype');
+  font-weight: 100 900; /* Thin to Bold */
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Apply to entire app */
+body {
+  font-family: 'IBM Plex Sans', 'Noto Sans', sans-serif;
+  font-weight: 400; /* Regular by default */
+}
