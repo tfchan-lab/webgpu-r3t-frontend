@@ -11,7 +11,7 @@ export default defineConfig({
 		'Cross-Origin-Opener-Policy': 'same-origin',
 		'Cross-Origin-Embedder-Policy': 'require-corp',
 	},
-	host: '192.168.1.161',
+	host: "192.168.1.161",
     port: 3002,
     https: {
       key: fs.readFileSync(path.resolve(__dirname, 'cert.key')),

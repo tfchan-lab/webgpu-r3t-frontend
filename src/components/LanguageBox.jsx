@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import Markdown from 'react-markdown';
 import { LanguageSelector as LanguageSelector1 } from './LanguageSelector1';
 import LanguageSelector2 from './LanguageSelector2';
 import { LANGUAGES, languageMapping } from '../utils/languages';
@@ -7,6 +8,7 @@ import { WindowExpandIcon, SpeedIcon, MemoryIcon } from './Glyph';
 const LanguageBox = ({
     status,
     text,
+    previewText, // Destructure previewText to hook it into the live markdown layouts
     output,
     language,
     targetLanguage,
@@ -52,14 +54,14 @@ const LanguageBox = ({
 	const handleCancel = (card) => {
 		switch (card) {
 			case "lang":
-				const card = document.getElementById("LanguageCard");
-				card.classList.add("motion-scale-out-0");
-				card.classList.add("motion-duration-250/scale")
-				card.classList.add("motion-translate-x-out-50")
-				card.classList.add("motion-translate-y-out-50")
-				card.classList.add("motion-duration-125/translate")
-				card.classList.add("motion-opacity-out-0");
-				card.classList.add("motion-duration-125/opacity")
+				const cardElement = document.getElementById("LanguageCard");
+				cardElement.classList.add("motion-scale-out-0");
+				cardElement.classList.add("motion-duration-250/scale")
+				cardElement.classList.add("motion-translate-x-out-50")
+				cardElement.classList.add("motion-translate-y-out-50")
+				cardElement.classList.add("motion-duration-125/translate")
+				cardElement.classList.add("motion-opacity-out-0");
+				cardElement.classList.add("motion-duration-125/opacity")
 				setTimeout(() => {
 					setShowLangCard(false);
 				}, 125)
@@ -72,6 +74,11 @@ const LanguageBox = ({
 	
     if (status !== "ready") return null;
 
+    // Helper to join the stable confirmed text tracking blocks cleanly with the active raw trail preview
+    // Wraps live unconfirmed text blocks in *italics* while historical logs display as **bold**
+	const formattedPreview = previewText?.trim() ? `*${previewText.trim()}*` : "";
+	const fullSourceMarkdown = text ? `${text.trim()} ${formattedPreview}`.trim() : formattedPreview;
+
     return (
         <div className="relative mt-4 mb-4">
             {/* Whisper box */}
@@ -82,10 +89,8 @@ const LanguageBox = ({
                         (key) => LANGUAGES[key] === languageMapping[language]
                     )}
                 </h3>
-                <div className="w-full h-[80px] overflow-y-auto overflow-wrap-anywhere border rounded-lg p-2">
-					<p>
-						{text}
-					</p>
+                <div className="w-full h-[80px] overflow-y-auto overflow-wrap-anywhere border rounded-lg p-2 prose dark:prose-invert max-w-none text-base">
+                    <Markdown>{fullSourceMarkdown}</Markdown>
                 </div>
                 <button
                     className="absolute top-1 right-1 px-1 text-sm bg-white dark:bg-gray-800 rounded"
@@ -136,17 +141,15 @@ const LanguageBox = ({
 					<div className="fixed bg-white dark:bg-gray-900 p-6 rounded-lg shadow-lg w-full" style={{ height: '100%' }}>
 						<div className="relative h-full">
 							{/* Whisper box */}
-							<div className="relative mb-4 h-[45%]"> {/* Added height for Whisper box */}
+							<div className="relative mb-4 h-[45%]">
 								<h3 className="text-l font-semibold">Source Language: {Object.keys(LANGUAGES).find(key => LANGUAGES[key] === languageMapping[language])}</h3>
-								<div className="w-full h-[calc(100%-40px)] overflow-y-auto overflow-wrap-anywhere border rounded-lg p-2">
-									<p>
-										{text}
-									</p>
+								<div className="w-full h-[calc(100%-40px)] overflow-y-auto overflow-wrap-anywhere border rounded-lg p-2 prose dark:prose-invert max-w-none text-base">
+									<Markdown>{fullSourceMarkdown}</Markdown>
 								</div>
 								<button className="absolute top-1 right-1 px-1 text-sm bg-white dark:bg-gray-800 rounded" onClick={() => handleCancel('lang')}>
 									⨯
 								</button>
-								<span className="absolute bottom-5 right-1 px-1 text-sm bg-gray-100 dark:bg-gray-800 rounded  flex items-center gap-1">
+								<span className="absolute bottom-5 right-1 px-1 text-sm bg-gray-100 dark:bg-gray-800 rounded flex items-center gap-1">
 									<SpeedIcon />
 									Speed: {tps ? tps.toFixed(2) : '0.00'} tok/s
 								</span>
@@ -156,30 +159,24 @@ const LanguageBox = ({
 								<p className="p-2 font-semibold">
 									From
 								</p>
-								{/* Selector for Whisper target language (A.K.A "From")*/}
 								<LanguageSelector1
 									language={language}
 									setLanguage={(e) => {
-										recorderRef.current?.stop();
 										setLanguage(e);
-										languageRef.current = e;
-										recorderRef.current?.start();
 									}}
 								/>
 								<p className="p-2 font-semibold">
 									To
 								</p>
-								{/* Selector for Translate target language (A.K.A "To")*/}
 								<LanguageSelector2
 									defaultLanguage={targetLanguage}
 									onChange={(x) => {
 										setTargetLanguage(x.target.value);
-										targetLanguageRef.current = x.target.value;
 									}}
 								/>
 							</div>
 							{/* Translate box */}
-							<div className="relative mt-6 h-[45%]"> {/* Added height for Translate box */}
+							<div className="relative mt-6 h-[45%]">
 								<h3 className="text-l font-semibold">Target Language: {Object.keys(LANGUAGES).find(key => LANGUAGES[key] === targetLanguage)}</h3>
 								<p className="w-full h-[calc(100%-40px)] overflow-y-auto overflow-wrap-anywhere border rounded-lg p-2">
 									{output}

@@ -1,7 +1,7 @@
 import { pipeline, TextStreamer, full, env } from '@huggingface/transformers';
 
 // Configure ONNX runtime
-env.backends.onnx.wasm = { numThreads: 4, wasmPaths: 'https://192.168.1.161:3002/ort-wasm/' };
+env.backends.onnx.wasm = { numThreads: 4, wasmPaths: 'https://' + import.meta.env.VITE_LAN_IP + ':3002/ort-wasm/' };
 
 const MAX_NEW_TOKENS = 64;
 const scores = [0, 0, 0, 0]; // Add entry here after adding model
@@ -9,7 +9,35 @@ const scores = [0, 0, 0, 0]; // Add entry here after adding model
 let processing = false;
 let transcriber = null;
 
-async function generate({ audio, language }) {
+// --- Helper function for calculating token bag-of-words cosine similarity ---
+function computeTokenCosineSimilarity(tokensA, tokensB) {
+    if (!tokensA || !tokensB || !tokensA.length || !tokensB.length) return 0;
+
+    const freqA = {};
+    const freqB = {};
+    const allTokens = new Set([...tokensA, ...tokensB]);
+
+    for (const t of tokensA) freqA[t] = (freqA[t] || 0) + 1;
+    for (const t of tokensB) freqB[t] = (freqB[t] || 0) + 1;
+
+    let dotProduct = 0;
+    let magnitudeA = 0;
+    let magnitudeB = 0;
+
+    for (const t of allTokens) {
+        const valA = freqA[t] || 0;
+        const valB = freqB[t] || 0;
+
+        dotProduct += valA * valB;
+        magnitudeA += valA * valA;
+        magnitudeB += valB * valB;
+    }
+
+    if (magnitudeA === 0 || magnitudeB === 0) return 0;
+    return dotProduct / (Math.sqrt(magnitudeA) * Math.sqrt(magnitudeB));
+}
+
+async function generate({ audio, language, previousText }) {
     if (processing) return;
     processing = true;
 
@@ -49,10 +77,25 @@ async function generate({ audio, language }) {
         streamer,
     });
 
-    // Send the final output back to the main thread
+    const currentText = output.text || '';
+    let similarityScore = null;
+
+    // Compute experimental token cosine similarity if previous window text is provided
+    if (previousText && previousText.trim() && currentText.trim()) {
+        try {
+            const tokensPrev = transcriber.tokenizer.encode(previousText);
+            const tokensCurr = transcriber.tokenizer.encode(currentText);
+            similarityScore = computeTokenCosineSimilarity(tokensPrev, tokensCurr);
+        } catch (err) {
+            console.error("[WhisperWorker] Error computing token similarity metrics:", err);
+        }
+    }
+
+    // Send the final output back to the main thread along with the similarity metric
     self.postMessage({
         status: 'whisper_complete',
-        output: [output.text],
+        output: [currentText],
+        similarity: similarityScore
     });
 
     processing = false;
@@ -158,8 +201,6 @@ async function benchmark(data) {
                 });
             },
         });
-		
-		const numMelBins = modelName[modelIndex] !== "Whisper Turbo" ? 80 : 128;
 		
 		// Run model with dummy input to compile shaders
         await benchmarkTranscriber.model.generate({

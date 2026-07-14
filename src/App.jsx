@@ -22,6 +22,42 @@ const MAX_SAMPLES = WHISPER_SAMPLING_RATE * MAX_AUDIO_LENGTH; // Maximum number 
 const DB_THRESHOLD = 30; // Minimum volume to feed audio chunk (Whisper near the mic: 30dB, Conversation near the mic: 50dB)
 const DB_OFFSET = 65; // Default offset value for microphone sensitivity (Tested values: 3.5mm jack stereo microphone = +65, Smartphone microphone = +85)
 
+// --- Fallback String-Based Normalization Helper (For Server/WebSocket Mode fallback) ---
+function normalizeWord(word) {
+	// Removes punctuation and converts to lowercase for resilient alignment checks
+	return word.toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?""']/g, "").trim();
+}
+
+// --- LocalAgreement-N (N=2) Word Alignment Utility Function ---
+function findLocalAgreement(prevStr, currStr) {
+	if (!prevStr) return { confirmed: "", preview: currStr, hasAgreement: false };
+	
+	const prevWords = prevStr.trim().split(/\s+/);
+	const currWords = currStr.trim().split(/\s+/);
+	
+	const maxOverlap = Math.min(prevWords.length, currWords.length);
+	
+	// Scan backward to find the longest tail-to-head word intersection sequence
+	for (let len = maxOverlap; len > 0; len--) {
+		const prevTailSlice = prevWords.slice(-len);
+		const currHeadSlice = currWords.slice(0, len);
+		
+		// Map normalizations across slices to bypass case/punctuation mismatch barriers
+		const normalizedPrevTail = prevTailSlice.map(normalizeWord).join(" ");
+		const normalizedCurrHead = currHeadSlice.map(normalizeWord).join(" ");
+		
+		if (normalizedPrevTail === normalizedCurrHead && normalizedPrevTail !== "") {
+			// Retain original styling and formatting layout from the current engine slice frame
+			const confirmed = currWords.slice(0, len).join(" ");
+			const preview = currWords.slice(len).join(" ");
+			return { confirmed, preview, hasAgreement: true };
+		}
+	}
+	
+	// Fallback if context slides cleanly out of view or during sharp conversational gaps
+	return { confirmed: "", preview: currStr, hasAgreement: false };
+}
+
 function App() {
 	// Load theme state from local storage, ~~hook is set here to stay consistent even when ThemeToggle component is unloaded~~ (needed only if hiding toggle button after when loaded)
 	const [isDarkMode, setIsDarkMode] = useState(() => {
@@ -31,39 +67,45 @@ function App() {
 	const [backend, setBackend] = useState(IS_WEBGPU_AVAILABLE ? 'webgpu' : 'wasm'); // Default to WebGPU if available with user's browser, otherwise WASM
 	
 	// Workers & Tool references
-    const WhisperWorker = useRef(null); // Reference to Whisper's worker
+	const WhisperWorker = useRef(null); // Reference to Whisper's worker
 	const TranslateWorker = useRef(null); // Reference to Translate's worker
-    const recorderRef = useRef(null); // Reference to the MediaRecorder
-    const audioContextRef = useRef(null); // Reference to the AudioContext
+	const recorderRef = useRef(null); // Reference to the MediaRecorder
+	const audioContextRef = useRef(null); // Reference to the AudioContext
 
-    // Model loading and progress bar
-    const [status, setStatus] = useState(null);
+	// Model loading and progress bar
+	const [status, setStatus] = useState(null);
 	const [ready, setReady] = useState(null); // TODO: Check if this is still in-use or just deprecated (other than in experimental)
-    const [loadingMessage, setLoadingMessage] = useState('');
-    const [progressItems, setProgressItems] = useState([]);
+	const [loadingMessage, setLoadingMessage] = useState('');
+	const [progressItems, setProgressItems] = useState([]);
 
-    // Model Inputs and outputs
-    const [text, setText] = useState(''); // Whisper output
+	// Model Inputs and outputs
+	const [text, setText] = useState(''); // Whisper output
+	const [previewText, setPreviewText] = useState(''); // Live LocalAgreement unconfirmed trailing sequence preview
 	const [tps, setTps] = useState(null); // Token per second speed counter for Whisper
-    const [input, setInput] = useState(''); // Translate input (from Whisper outputs, Experimental: LocalAgreement-N, N=2 confirmed outputs)
+	const [input, setInput] = useState(''); // Translate input (from Whisper outputs, Experimental: LocalAgreement-N, N=2 confirmed outputs)
 	const inputRef = useRef(input);
-    const [language, setLanguage] = useState('en'); // Default language for Whisper set to English
+	const [language, setLanguage] = useState('en'); // Default language for Whisper set to English
 	const languageRef = useRef(language);
-    const [targetLanguage, setTargetLanguage] = useState('zho_Hant'); // Default language for translation set to Traditional Chinese
+	const [targetLanguage, setTargetLanguage] = useState('zho_Hant'); // Default language for translation set to Traditional Chinese
 	const targetLanguageRef = useRef(targetLanguage);
 	const [output, setOutput] = useState(''); // Translation output
 
-    // Audio recording and processing
-    const [recording, setRecording] = useState(false);
-    const [isProcessing, setIsProcessing] = useState(false);
-    const [chunks, setChunks] = useState([]); // Audio chunks from MediaRecorder
-    const [stream, setStream] = useState(null); // Audio stream from microphone
-	const [decibel, setDecibel] = useState(null); // Audio chunk volume level
-	const [dbOffset, setDbOffset] = useState(DB_OFFSET); // Adjustable microphone sensitivity
-	
 	// Past sentences log
 	const [pastOutputs, setPastOutputs] = useState([]);
 	const pastOutputsRef = useRef(pastOutputs);
+
+	// Context Window Internal Cache & Suppression Tracking
+	const lastRawTranscriptRef = useRef(''); // Retains the previous raw iteration text payload for alignment checking
+	const lastSentTranscriptRef = useRef(''); // Tracks what was sent to suppress duplicate/unconfirmed pipeline flushes
+	const hasActiveStreakRef = useRef(false); // Tracks whether an agreement streak was alive prior to breaking
+
+	// Audio recording and processing
+	const [recording, setRecording] = useState(false);
+	const [isProcessing, setIsProcessing] = useState(false);
+	const [chunks, setChunks] = useState([]); // Audio chunks from MediaRecorder
+	const [stream, setStream] = useState(null); // Audio stream from microphone
+	const [decibel, setDecibel] = useState(null); // Audio chunk volume level
+	const [dbOffset, setDbOffset] = useState(DB_OFFSET); // Adjustable microphone sensitivity
 	
 	// Model inference mode (in `ModelSelection.jsx`)
 	const [useLocalTranscription, setUseLocalTranscription] = useState(false); // Default to local transcription
@@ -79,34 +121,176 @@ function App() {
 	const [benchmarkScores, setBenchmarkScores] = useState([0, 0, 0, 0]);
 	const [benchmarkRunning, setBenchmarkRunning] = useState(false);
 	
-    // Setup workers and event listeners
-    useEffect(() => {
-        if (!WhisperWorker.current) {
+	// --- Safely bounded requestData interface ---
+	const safelyRequestData = () => {
+		if (recorderRef.current && recorderRef.current.state === "recording") {
+			try {
+				recorderRef.current.requestData();
+			} catch (err) {
+				console.warn("[MediaRecorder Guard] Blocked requestData exception during transition:", err);
+			}
+		}
+	};
+
+	// --- Unified Token Similarity & Fallback Sliding Window Entry Point ---
+	const handleIncomingTranscription = (currentRawText, workerSimilarityScore = null) => {
+		if (!currentRawText.trim()) {
+			setIsProcessing(false);
+			safelyRequestData();
+			return;
+		}
+
+		const previousRawText = lastRawTranscriptRef.current;
+
+		console.log(
+			`%c\n[LA-2 Window Eval] 🔄 Audio Frame Received at ${new Date().toLocaleTimeString()}`,
+			"color: #38bdf8; font-weight: bold; font-size: 11px;"
+		);
+
+		// Determine agreement logic based on whether we have experimental worker token validation scores
+		if (previousRawText) {
+			let hasAgreement = false;
+			let confirmed = "";
+			let preview = currentRawText;
+
+			if (workerSimilarityScore !== null) {
+				// Experimental Token Cosine Similarity Route
+				const SIM_THRESHOLD = 0.82;
+				hasAgreement = workerSimilarityScore >= SIM_THRESHOLD;
+				console.log(` ├── 📊 Token Cosine Similarity Score: ${(workerSimilarityScore * 100).toFixed(1)}% (Threshold: ${SIM_THRESHOLD * 100}%)`);
+				
+				if (hasAgreement) {
+					confirmed = currentRawText; // Continuous expansion frame match
+					preview = "";
+				}
+			} else {
+				// Fallback to layout string splicing rule when running Server Mode
+				const alignment = findLocalAgreement(previousRawText, currentRawText);
+				hasAgreement = alignment.hasAgreement;
+				confirmed = alignment.confirmed;
+				preview = alignment.preview;
+			}
+
+			if (hasAgreement) {
+				console.log(` ├── 🤝 Agreement Status: %cMATCH FOUND (Streak Continuing)`, "color: #22c55e; font-weight: bold;");
+				hasActiveStreakRef.current = true;
+				setText(confirmed.length > 0 ? `**${confirmed.trim()}**` : `**${currentRawText.trim()}**`);
+				setPreviewText(preview);
+			} else {
+				console.log(` └── 🤝 Agreement Status: %cSTREAK BROKEN / NO OVERLAP`, "color: #f97316; font-style: italic;");
+				
+				const completedRawSentence = previousRawText?.trim();
+				
+				if (hasActiveStreakRef.current && completedRawSentence && completedRawSentence !== lastSentTranscriptRef.current) {
+					console.log(` └── 🚀 Dispatching last agreed text to translation pipeline.`);
+					lastSentTranscriptRef.current = completedRawSentence;
+
+					if (useLocalTranslation && TranslateWorker.current) {
+						TranslateWorker.current.postMessage({
+							type: 'translate',
+							data: { 
+								text: completedRawSentence, 
+								src_lang: languageRef.current, 
+								tgt_lang: targetLanguageRef.current 
+							}
+						});
+					} else if (!useLocalTranslation) {
+						translateSentenceToServer(completedRawSentence);
+					}
+				}
+
+				hasActiveStreakRef.current = false;
+				setText("");
+				setPreviewText(currentRawText);
+			}
+		} else {
+			hasActiveStreakRef.current = false;
+			setPreviewText(currentRawText);
+		}
+
+		lastRawTranscriptRef.current = currentRawText;
+		setIsProcessing(false);
+		safelyRequestData();
+	};
+	
+	const translateSentenceToServer = async (rawTextPayload) => {
+		if (!rawTextPayload || rawTextPayload.trim() === "" || languageRef.current === targetLanguageRef.current) {
+			return;
+		}
+		
+		console.log(`[App] [${getTimestamp()}] Triggering Streak Translation Server Route... (${languageRef.current} -> ${targetLanguageRef.current})`);
+		try {
+			const endpoint = endpoints[1] !== '' ? 'https://' + endpoints[1] + '/translate' : import.meta.env.VITE_TRANSLATE_API_ENDPOINT;
+			const response = await fetch(endpoint, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+				},
+				body: JSON.stringify({
+					text: rawTextPayload,
+					src_lang: languageRef.current,
+					tgt_lang: targetLanguageRef.current,
+				}),
+			});
+
+			if (!response.ok) throw new Error(`HTTP status: ${response.status}`);
+
+			const data = await response.json();
+			if (data.error) throw new Error(data.error);
+
+			setOutput(data.translated_text);
+
+			if (
+				data.translated_text.trim() &&
+				(pastOutputsRef.current.length === 0 || data.translated_text !== pastOutputsRef.current[pastOutputsRef.current.length - 1].sentence)
+			) {
+				setPastOutputs((prev) => {
+					const updatedOutputs = [
+						...prev,
+						{
+							timestamp: new Date().toLocaleTimeString(),
+							sentence: data.translated_text,
+						},
+					];
+					pastOutputsRef.current = updatedOutputs;
+					return updatedOutputs;
+				});
+			}
+		} catch (error) {
+			console.warn(`[App] [${getTimestamp()}] Error during streak broken server dispatch: ${error}`);
+		}
+	};
+
+	// Setup workers and event listeners
+	useEffect(() => {
+		if (!WhisperWorker.current) {
 			// Create Whisper's worker if it does not exist yet
-            WhisperWorker.current = new Worker(new URL('./WhisperWorker.js', import.meta.url), { type: 'module' });
+			WhisperWorker.current = new Worker(new URL('./WhisperWorker.js', import.meta.url), { type: 'module' });
 			console.log(`[App] [${getTimestamp()}] Whisper Worker set up.`);
-        }
+		}
 		
 		if (useLocalTranslation && !TranslateWorker.current) {
 			// Create Translate's worker if it does not exist yet
-            TranslateWorker.current = new Worker(new URL('./TranslateWorker.js', import.meta.url), { type: 'module' });
+			TranslateWorker.current = new Worker(new URL('./TranslateWorker.js', import.meta.url), { type: 'module' });
 			console.log(`[App] [${getTimestamp()}] Translate Worker set up.`);
-        }
+		}
 		
 		// Create a callback function for message from the two worker threads
-        const onMessageReceived = (e) => {
+		const onMessageReceived = (e) => {
 			mainThreadHandler(e);
 		};
 		
 		// Attach callback functions as event listeners
-        WhisperWorker.current.addEventListener('message', onMessageReceived);
+		WhisperWorker.current.addEventListener('message', onMessageReceived);
 		if (useLocalTranslation) TranslateWorker.current.addEventListener('message', onMessageReceived);
 		
 		// Clean-up function when Whisper/Translate is unmounted
-        return () => {
-            WhisperWorker.current.removeEventListener('message', onMessageReceived);
-			if (useLocalTranslation) TranslateWorker.current.removeEventListener('message', onMessageReceived);
-        };
+		return () => {
+			WhisperWorker.current?.removeEventListener('message', onMessageReceived);
+			if (useLocalTranslation && TranslateWorker.current) {
+				TranslateWorker.current.removeEventListener('message', onMessageReceived);
+			}
+		};
 	});
 	
 	useEffect(() => {
@@ -118,7 +302,6 @@ function App() {
 						recorderRef.current?.start();
 						console.log(`[App] [${getTimestamp()}] Started MediaRecorder, status: ${recorderRef.current.state}`);
 					} catch (InvalidStateError) {
-						// Note: https://developer.mozilla.org/en-US/docs/Web/API/MediaRecorder/stop 
 						console.log(`[App] [${getTimestamp()}] Restarting MediaRecorder, status: ${recorderRef.current.state}`);
 					}
 				}
@@ -141,17 +324,7 @@ function App() {
 
 					socket.on("transcription", (data) => {
 						console.log(`[App] [${getTimestamp()}] Received transcription from server: ${data.transcription}`);
-						setText(data.transcription);
-						if (data.transcription && useLocalTranslation && TranslateWorker.current) {
-							TranslateWorker.current.postMessage({
-								type: 'translate',
-								data: { text: data.transcription, src_lang: language, tgt_lang: targetLanguage }
-							});
-						} else if (data.transcription && !useLocalTranslation) {
-							translate();
-						}
-						setIsProcessing(false);
-						recorderRef.current?.requestData();
+						handleIncomingTranscription(data.transcription || '');
 					});
 				}
 			}
@@ -187,15 +360,17 @@ function App() {
 
 				// Cleanup function for workers
 				return () => {
-					WhisperWorker.current.removeEventListener('message', onMessageReceived);
-					if (useLocalTranslation) TranslateWorker.current.removeEventListener('message', onMessageReceived);
+					WhisperWorker.current?.removeEventListener('message', onMessageReceived);
+					if (useLocalTranslation && TranslateWorker.current) {
+						TranslateWorker.current.removeEventListener('message', onMessageReceived);
+					}
 				};
 			}
 		}
 	});
 
-    // Setup MediaRecorder and microphone stream
-    useEffect(() => {
+	// Setup MediaRecorder and microphone stream
+	useEffect(() => {
 		// Avoid re-initializing if recorderRef.current already exists
 		if (recorderRef.current) return;
 
@@ -242,9 +417,9 @@ function App() {
 							if (e.data.size > 0) {
 								setChunks((prev) => [...prev, e.data]);
 							} else {
-								// Empty chunk received, request new data after a short timeout
+								// Empty chunk received, request new data safely after a short timeout
 								setTimeout(() => {
-									recorderRef.current?.requestData();
+									safelyRequestData();
 								}, 25);
 							}
 						};
@@ -263,7 +438,9 @@ function App() {
 		// Cleanup function to stop recording and reset references
 		return () => {
 			if (recorderRef.current) {
-				recorderRef.current.stop();
+				if (recorderRef.current.state !== 'inactive') {
+					recorderRef.current.stop();
+				}
 				recorderRef.current = null;
 			}
 			if (audioContextRef.current) {
@@ -290,20 +467,55 @@ function App() {
 				const decoded = await audioContextRef.current.decodeAudioData(arrayBuffer);
 				let audio = decoded.getChannelData(0);
 
-				if (audio.length > MAX_SAMPLES) {
-					// Trim audio to the last MAX_SAMPLES
-					audio = audio.slice(-MAX_SAMPLES);
+				// --- 30 Second Context Reset Handling & Pipeline Flush ---
+				if (audio.length >= MAX_SAMPLES) {
+					console.log(`[App] [${getTimestamp()}] Whisper attention context limit reached (${MAX_AUDIO_LENGTH}s). Flushing preview buffer and cycling recorder hardware context.`);
+					
+					// Treat the boundary flush as an explicit broken streak to process the final sentence
+					const finalRawSentence = lastRawTranscriptRef.current?.trim();
+					if (hasActiveStreakRef.current && finalRawSentence && finalRawSentence !== lastSentTranscriptRef.current) {
+						lastSentTranscriptRef.current = finalRawSentence; // Lock translation re-fire trigger
+
+						if (useLocalTranslation && TranslateWorker.current) {
+							TranslateWorker.current.postMessage({
+								type: 'translate',
+								data: { text: finalRawSentence, src_lang: languageRef.current, tgt_lang: targetLanguageRef.current }
+							});
+						} else if (!useLocalTranslation) {
+							translateSentenceToServer(finalRawSentence);
+						}
+					}
+					
+					// Clear working caches completely to allow Whisper to begin mapping a fresh, loop-free audio layout
+					lastRawTranscriptRef.current = '';
+					lastSentTranscriptRef.current = ''; // Reset the sent-cache tracking for the next hardware window cycle
+					hasActiveStreakRef.current = false;
+					setText(''); // Clear UI track since the phrase has been flushed and handed off
+					setPreviewText('');
+					setChunks([]);
+					
+					// Recycle the operational media capture module instance
+					if (recorderRef.current && recorderRef.current.state === 'recording') {
+						recorderRef.current.stop();
+						setTimeout(() => {
+							if (recorderRef.current && recorderRef.current.state === 'inactive') {
+								recorderRef.current.start();
+							}
+						}, 50);
+					}
+					return;
 				}
 
 				// Calculate the dB level of the audio chunk
 				setDecibel(calculateDB(audio));
 
-				// Only send the chunk to the worker if the volume exceeds the threshold (May need to revise to work with LA-2)
+				// Only send the chunk to the worker if the volume exceeds the threshold
 				if (decibel !== null && decibel >= DB_THRESHOLD) {
 					if (useLocalTranscription) {
+						// Pass the previous raw transcript payload to let the worker analyze token similarity metrics internally
 						WhisperWorker.current.postMessage({
 							type: 'generate',
-							data: { audio, language },
+							data: { audio, language, previousText: lastRawTranscriptRef.current },
 						});
 					} else if (!useLocalTranscription && websocket) {
 						// Convert Float32Array to ArrayBuffer for binary transmission
@@ -316,26 +528,15 @@ function App() {
 					}
 				} else {
 					await new Promise(r => setTimeout(r, 1000));
-					return recorderRef.current?.requestData(); // Recursively run until fulfill threshold
+					safelyRequestData();
+					return;
 				}
 			};
 			fileReader.readAsArrayBuffer(blob);
 		} else {
-			recorderRef.current?.requestData();
+			safelyRequestData();
 		}
-	}, [status, recording, isProcessing, chunks, language, useLocalTranscription, websocket]);
-	
-	// These hooks can be deprecated soon after testing for side effects
-	useEffect(() => {
-		if (inputRef.current === text) return; // Last sentence = Current sentence
-		
-		setInput(text);
-		inputRef.current = text;
-		
-		if (status === 'ready') { // Prevent initial load and reload error due to translation requests before model fully loaded (This is probably fixed and no longer needed)
-			translate();
-		}
-	}, [text]);
+	}, [status, recording, isProcessing, chunks, language, useLocalTranscription, websocket, previewText, decibel]);
 	
 	useEffect(() => {
 		languageRef.current = language;
@@ -344,7 +545,6 @@ function App() {
 	useEffect(() => {
 		targetLanguageRef.current = targetLanguage;
 	}, [targetLanguage]);
-	// Here
 
 	// Main control logic that handles statuses/results from Workers/Servers
 	const mainThreadHandler = (e) => {
@@ -360,14 +560,16 @@ function App() {
 				break;
 			// Worker initiation
 			case 'initiate':
-				setProgressItems((prev) => [...prev, { ...e.data, workerType: e.data.workerType }]);
+				// Handle raw engine event messages seamlessly by defaulting missing payload markers
+				setProgressItems((prev) => [...prev, { ...e.data, workerType: e.data.workerType || 'transcription' }]);
 				break;
 			// Progress bar update
 			case 'progress':
+				// Fixed file comparison matching key syntax arrays to handle unattached worker updates smoothly
 				setProgressItems((prev) =>
 					prev.map((item) =>
-						item.file === e.data.file && item.workerType === e.data.workerType
-							? { ...item, ...e.data }
+						item.file === e.data.file || (e.data.data && item.file === e.data.data.file)
+							? { ...item, ...(e.data.data || e.data) }
 							: item
 					)
 				);
@@ -377,7 +579,7 @@ function App() {
 				setProgressItems((prev) =>
 					prev.filter(
 						(item) =>
-							!(item.file === e.data.file && item.workerType === e.data.workerType)
+							!(item.file === e.data.file || (e.data.data && item.file === e.data.data.file))
 					)
 				);
 				break;
@@ -391,8 +593,8 @@ function App() {
 					setStatus('ready');
 				}
 				try {
-					if (recorderRef.current?.state === 'inactive')
-					recorderRef.current?.start();
+					if (recorderRef.current && recorderRef.current.state === 'inactive')
+						recorderRef.current.start();
 				} catch (InvalidStateError) {
 					console.log(`[App] [${getTimestamp()}] Restarting MediaRecorder.`)
 				}
@@ -407,20 +609,12 @@ function App() {
 			// Whisper starts listening for inputs
 			case 'whisper_start':
 				setIsProcessing(true);
-				recorderRef.current?.requestData();
+				safelyRequestData();
 				break;
 			// Whisper finishes processing current inputs
 			case 'whisper_complete':
-				setIsProcessing(false);
-				setText(e.data.output[0]);
-				if (e.data.output[0] && useLocalTranslation && TranslateWorker.current) {
-					TranslateWorker.current.postMessage({
-						type: 'translate',
-						data: { text: e.data.output[0], src_lang: language, tgt_lang: targetLanguage }
-					});
-				} else if (e.data.output[0] && !useLocalTranslation) {
-					translate();
-				}
+				// Extract the computed token cosine similarity from the local worker payload
+				handleIncomingTranscription(e.data.output[0] || '', e.data.similarity ?? null);
 				break;
 			// Translate finishes processing current inputs
 			case 'translate_complete':
@@ -553,7 +747,6 @@ function App() {
 	
 	const reloadModel = async () => {
 		// Terminate the existing worker(s) to unload the model(s)
-		// Note: Usually only the translate model goes OOM, therefore I only reload TranslateWorker here.
 		if (useLocalTranslation && TranslateWorker.current) {
 			TranslateWorker.current.terminate();
 			TranslateWorker.current = null;
@@ -572,8 +765,7 @@ function App() {
 		TranslateWorker.current.postMessage({ type: 'load' });
 	};
 	
-	// Function to calculate RMS and dB for volume thresholding (TODO: choose a better sampling windows to increase the accuracy)
-	// Useful formulas: https://helpfiles.keysight.com/csg/89600B/Webhelp/Subsystems/gettingstarted/content/concepts_decibels.htm
+	// Function to calculate RMS and dB for volume thresholding
 	function calculateRMS(audioData) {
 		let sum = 0;
 		const length = audioData.length;
@@ -593,12 +785,11 @@ function App() {
 		return 20 * Math.log10(rms) + dbOffset;
 	}
 	
-	// TODO: Move this to ./utils in the future if used by multiple components
 	function getTimestamp() {
 		return new Date().toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).replace(/,/g, '').replace(/ /g, '/').replace(/(\d{2})\/(\w{3})\/(\d{4})\/(\d{2}):(\d{2}):(\d{2})/, '$1/$2/$3 $4:$5:$6');
 	}
 	
-    return (
+	return (
 		<div className="flex flex-col h-screen mx-auto justify-end text-gray-800 dark:text-gray-200 bg-white dark:bg-gray-900 transition-colors duration-500">
 			{/* Star background elements */}
 			<div className="z-0">
@@ -606,10 +797,10 @@ function App() {
 			</div>
 			{
 				<div className="h-full overflow-auto scrollbar-thin flex justify-center items-center flex-col relative z-10">
-					{/* Theme toggle button (Appear on main/loading screen, disappear when ready) */}
+					{/* Theme toggle button */}
 					{true && (<ThemeToggle isDarkMode={isDarkMode} setIsDarkMode={setIsDarkMode} />)}
 					
-					{/* App Title (Will always appear on-screen) */}
+					{/* App Title */}
 					<div className="flex flex-col items-center mb-1 max-w-[90%] md:max-w-[500px] text-center">
 						<h1 className="text-4xl font-bold mb-1">WebGPU NoteTaker</h1>
 						<h2 className="text-xl font-semibold">Real-time all-in-one assistant for</h2>
@@ -622,7 +813,7 @@ function App() {
 					<div className="flex flex-col items-center px-4 w-[90%] md:w-[500px]">
 						{/* Main Content */}
 						<div className="w-full md:w-[500px] p-2">
-							{/* Audio visualizer (Also always on-screen) */}
+							{/* Audio visualizer */}
 							<AudioVisualizer
 								className="w-full rounded-lg"
 								stream={stream}
@@ -634,6 +825,7 @@ function App() {
 							<LanguageBox
 								status={status}
 								text={text}
+								previewText={previewText}
 								output={output}
 								language={language}
 								targetLanguage={targetLanguage}
@@ -652,7 +844,7 @@ function App() {
 							/>
 						</div>
 						
-						{/* Welcome Screen (before loading the models) */}
+						{/* Welcome Screen */}
 						<WelcomeScreen
 							status={status}
 							setStatus={setStatus}

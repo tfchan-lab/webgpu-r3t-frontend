@@ -3,7 +3,7 @@ import { pipeline, TextStreamer, full, env, } from '@huggingface/transformers';
 // Configure ONNX runtime
 // Note: env.wasm.numThreads >1 will not work without crossOriginIsolated enabled.
 // Reference: https://web.dev/articles/cross-origin-isolation-guide?utm_source=devtools&utm_campaign=stable
-env.backends.onnx.wasm = { numThreads: 4, wasmPaths: 'https://192.168.1.161:3002/ort-wasm/' };
+env.backends.onnx.wasm = { numThreads: 4, wasmPaths: 'https://' + import.meta.env.VITE_LAN_IP + ':3002/ort-wasm/' };
 
 let processing = false;
 let translator = null;
